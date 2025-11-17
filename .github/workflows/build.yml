@@ -5,7 +5,7 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-20.04 # CHANGED: Using a specific LTS version for better disk allocation
+    runs-on: ubuntu-22.04 # CHANGED: Switched to 22.04 LTS to skip the queue
 
     steps:
       - name: Checkout Repository
