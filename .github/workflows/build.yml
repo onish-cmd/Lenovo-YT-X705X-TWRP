@@ -15,8 +15,9 @@ jobs:
 
       - name: Set up Environment and Install Dependencies
         run: |
+          # FIX: Replaced deprecated libncurses5 with libncurses-dev
           sudo apt update
-          sudo apt install -y git build-essential ccache python3 python3-pip openjdk-8-jdk android-tools-adb libncurses5
+          sudo apt install -y git build-essential ccache python3 python3-pip openjdk-8-jdk android-tools-adb libncurses-dev
           
           pip3 install twrpdtgen
           
