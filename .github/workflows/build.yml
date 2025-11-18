@@ -1,80 +1,107 @@
-name: TWRP Custom Recovery Builder (YT-X705X)
+# Workflow to generate a TWRP device tree using a manual modification workaround.
+name: Device Tree Generation (Lenovo YT-X705X) - Production Ready
 
 on:
+  # Trigger the workflow on every push to the main branch
+  push:
+    branches: [ main ]
+  # Allow manual execution via the GitHub Actions UI
   workflow_dispatch:
 
 jobs:
-  build:
-    runs-on: ubuntu-22.04
-
+  generate_and_upload:
+    runs-on: ubuntu-latest
+    
     steps:
-      - name: Checkout Repository
+      - name: Checkout Your Repository (boot.img)
+        # Check out the main repo to the root directory (where boot.img is)
         uses: actions/checkout@v4
         with:
-          submodules: true
+          # Use the default token for your main repository
+          token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Set up Environment and Install Dependencies
+      - name: Checkout Android Image Kitchen (AIK)
+        # Checkout AIK into the 'AIK' folder. Explicitly passing the token ensures
+        # the action can successfully query the GitHub API to find the repo/branch.
+        uses: actions/checkout@v4
+        with:
+          repository: carliv/android-image-kitchen
+          path: AIK
+          token: ${{ secrets.GITHUB_TOKEN }} # Crucial fix for the 'Not Found' error
+
+      - name: Set up Python and Dependencies
         run: |
-          # --- AGGRESSIVE DISK SPACE CLEANUP (Frees up ~15GB margin) ---
-          sudo rm -rf /usr/share/dotnet
-          sudo rm -rf /usr/local/lib/android
-          sudo apt clean
-          # -------------------------------------------------------------
-          
-          # Install core dependencies
-          sudo apt update
-          sudo apt install -y git build-essential ccache python3 python3-pip openjdk-8-jdk android-tools-adb libncurses-dev
-          
-          # Install the Device Tree Generator
-          pip3 install twrpdtgen
-          
-          # Set Java 8 as default (required for AOSP compilation)
-          sudo update-alternatives --set java /usr/lib/jvm/java-8-openjdk-amd64/jre/bin/java
-
-      - name: Install Repo Tool and Sync TWRP Source Code (FIXED PATH)
+          uses: actions/setup-python@v5
+          with:
+            python-version: '3.x' 
+      
+      - name: Install twrpdtgen and AIK dependencies
         run: |
-          # 1. Install the REPO tool and set path for this shell session
-          mkdir -p ~/bin
-          curl https://storage.googleapis.com/git-repo-downloads/repo > ~/bin/repo
-          chmod a+x ~/bin/repo
-          export PATH=~/bin:$PATH
+          # Install twrpdtgen
+          pip install twrpdtgen
+          # Install utilities needed for AIK (cpio)
+          sudo apt-get update && sudo apt-get install -y git build-essential cpio
 
-          # 2. Start the sync process in a new directory
-          mkdir twrp_source
-          cd twrp_source
-          
-          repo init -u https://github.com/minimal-manifest-twrp/platform_manifest_twrp_omni.git -b twrp-9.0
-          
-          echo "Starting repo sync. This will take several hours..."
-          repo sync -j$(nproc --all)
-
-      - name: Execute Device Tree Generator
+      - name: Manual Image Fix and Device Tree Generation
+        id: generate
         run: |
-          # We need to explicitly run twrpdtgen with Python 3 here
-          python3 -m twrpdtgen -i -p ../boot.img YT_X705X
+          echo "--- Starting Manual Image Fix and Generation ---"
           
-          # Move the generated files into the source directory
-          cp -r device/lenovo/YT-X705X twrp_source/device/lenovo/
+          AIK_DIR="AIK"
+          
+          # Check for AIK and boot.img before starting the process
+          if [ ! -d "$AIK_DIR" ]; then
+            echo "Critical Error: AIK tools directory not found at $AIK_DIR."
+            exit 1
+          fi
+          if [ ! -f "boot.img" ]; then
+            echo "Critical Error: boot.img not found in the root directory."
+            exit 1
+          fi
+          
+          # 1. Unpack the original boot.img
+          echo "1. Unpacking original boot.img..."
+          # Move boot.img into the AIK folder for processing
+          mv ./boot.img $AIK_DIR/
+          cd $AIK_DIR
+          ./unpackimg.sh boot.img
 
-      - name: Compile TWRP Recovery Image
+          # 2. Inject the missing device property into default.prop
+          echo "2. Injecting missing codename property into extracted image..."
+          echo "ro.product.system.device=YT-X705X" >> split_img/ramdisk/default.prop
+          
+          # 3. Repack the modified image
+          MODIFIED_IMAGE="../boot_modified.img"
+          echo "3. Repacking modified image to $MODIFIED_IMAGE..."
+          ./repackimg.sh -o $MODIFIED_IMAGE
+
+          # 4. Move back to root directory and run twrpdtgen on the modified image
+          cd ..
+          echo "4. Running twrpdtgen on the modified image..."
+          # Since the image now contains the codename, twrpdtgen should succeed
+          python3 -m twrpdtgen $MODIFIED_IMAGE
+          
+          # 5. Locate the output directory
+          DT_OUTPUT_PATH=$(find . -type d -name "YT-X705X" -path "./device/*" 2>/dev/null | head -n 1)
+          
+          if [ -d "$DT_OUTPUT_PATH" ]; then
+            echo "Successfully generated device tree directory at: $DT_OUTPUT_PATH"
+            echo "device_tree_path=$DT_OUTPUT_PATH" >> $GITHUB_OUTPUT
+          else
+            echo "Critical Error: Could not locate the generated device tree directory named 'YT-X705X'."
+            exit 1
+          fi
+
+      - name: Verify Generated Files
+        if: success()
         run: |
-          cd twrp_source
-          export ALLOW_MISSING_DEPENDENCIES=true
-          
-          source build/envsetup.sh
-          
-          lunch omni_YT_X705X-eng
-          
-          mka recoveryimage -j$(nproc --all)
+          echo "--- Contents of generated device tree directory ---"
+          ls -R ${{ steps.generate.outputs.device_tree_path }}
 
-      - name: Upload Recovery Image Artifact
+      - name: Upload Generated Device Tree Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: TWRP-YT-X705X-recovery
-          path: twrp_source/out/target/product/YT_X705X/recovery.img
-
-      - name: Cleanup Source Code
-        if: always()
-        run: |
-          echo "Cleaning up large twrp_source directory..."
-          rm -rf twrp_source
+          name: lenovo-YT-X705X-device-tree
+          path: ${{ steps.generate.outputs.device_tree_path }}
+          retention-days: 7
+          compression-level: 9
